@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CloudSSH Ops Gateway
-  version: 0.2.0
+  version: 0.3.0
   description: Controlled operations API for servers saved and trusted in CloudSSH.
 servers:
   - url: https://YOUR_CLOUDSSH_DOMAIN
@@ -15,16 +15,6 @@ paths:
       responses:
         '200':
           description: Gateway is ready.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  operator:
-                    type: string
-                required: [status, operator]
         '401':
           description: Invalid bearer credential.
         '503':
@@ -36,13 +26,6 @@ paths:
       responses:
         '200':
           description: Saved servers.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: object
-                  additionalProperties: true
         '401':
           description: Invalid bearer credential.
   /api/ops/check:
@@ -65,18 +48,6 @@ paths:
       responses:
         '200':
           description: Safety classification for the command.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  blocked:
-                    type: boolean
-                  confirmation_required:
-                    type: boolean
-                  reason:
-                    type: string
-                required: [blocked, confirmation_required]
         '400':
           description: Invalid command body.
         '401':
@@ -108,42 +79,79 @@ paths:
                 approve_risk:
                   type: boolean
                   default: false
-                  description: Set true only after the human explicitly approves a command that previously returned confirmation_required.
               required: [server_id, command]
               additionalProperties: false
       responses:
         '200':
           description: Command completed.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  stdout:
-                    type: string
-                  stderr:
-                    type: string
-                  exit_code:
-                    type: integer
-                required: [stdout, stderr, exit_code]
         '401':
           description: Invalid bearer credential.
         '403':
           description: Command is permanently blocked by the CloudSSH safety policy.
         '409':
           description: Host trust is incomplete or this command requires explicit human approval.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                  confirmation_required:
-                    type: boolean
-                required: [error]
         '504':
           description: SSH connection or command execution timed out.
+  /api/ops/run:
+    post:
+      operationId: runOpsPlan
+      summary: Execute a bounded ordered deployment or validation plan on one saved server.
+      description: Every step is safety-preflighted before any SSH connection is opened. Risk approval is scoped to each step. By default execution stops after the first non-zero exit code. Each step currently uses an isolated short-lived SSH session so one failed session cannot poison later execution state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                server_id:
+                  type: integer
+                  minimum: 1
+                stop_on_error:
+                  type: boolean
+                  default: true
+                steps:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        minLength: 1
+                        maxLength: 80
+                      command:
+                        type: string
+                        minLength: 1
+                        maxLength: 32768
+                      timeout_ms:
+                        type: integer
+                        minimum: 1000
+                        maximum: 180000
+                        default: 30000
+                      approve_risk:
+                        type: boolean
+                        default: false
+                    required: [command]
+                    additionalProperties: false
+              required: [server_id, steps]
+              additionalProperties: false
+      responses:
+        '200':
+          description: Plan execution result, including ordered per-step stdout, stderr, and exit_code.
+        '400':
+          description: Invalid plan or plan exceeds bounded size/time budgets.
+        '401':
+          description: Invalid bearer credential.
+        '403':
+          description: At least one step is permanently blocked by the safety policy. No SSH session is opened.
+        '409':
+          description: Host trust is incomplete or at least one step requires explicit human approval. No plan step is executed.
+        '502':
+          description: SSH transport failed while running a step. Partial results are returned.
+        '504':
+          description: A step timed out. Partial results are returned.
 components:
   securitySchemes:
     bearerAuth:
