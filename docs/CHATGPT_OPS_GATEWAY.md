@@ -13,12 +13,13 @@ Instead it:
 3. looks up servers already owned by that CloudSSH account;
 4. reuses CloudSSH's encrypted credential store and one-time connection-token path;
 5. requires a previously trusted host fingerprint for the target and every configured jump host;
-6. opens an internal CloudSSH SSH session and executes through the existing bounded exec channel;
-7. returns only `stdout`, `stderr`, and `exit_code` to the API caller.
+6. runs the shared CloudSSH command-safety policy before opening SSH;
+7. opens an internal CloudSSH SSH session only for commands that are allowed to proceed;
+8. executes through the existing bounded exec channel and returns only `stdout`, `stderr`, and `exit_code`.
 
 Anonymous SSH input cannot enable ops mode: `opsMode` is stripped from untrusted client-supplied connection configs and is only injected by the Worker gateway after authorization.
 
-CloudSSH's existing command safety rules remain active. Catastrophic commands that are permanently blocked remain blocked. Commands classified as requiring confirmation return HTTP `409` with `confirmation_required: true`; the caller must only retry with `approve_risk: true` after explicit human approval.
+CloudSSH's existing command safety rules remain active. Catastrophic commands that are permanently blocked remain blocked. Commands classified as requiring confirmation return HTTP `409` with `confirmation_required: true`; the caller must only retry with `approve_risk: true` after explicit human approval. The SSH session repeats the same safety check as defense in depth.
 
 ## Required configuration
 
@@ -84,6 +85,50 @@ GET /api/ops/servers
 
 Returns the same non-secret server metadata available to the authenticated CloudSSH server list. Credentials are not returned.
 
+### Preflight a command
+
+```http
+POST /api/ops/check
+Content-Type: application/json
+
+{
+  "command": "systemctl restart nginx"
+}
+```
+
+This endpoint applies the exact CloudSSH command-safety policy **without opening an SSH session**.
+
+Safe command:
+
+```json
+{
+  "blocked": false,
+  "confirmation_required": false
+}
+```
+
+Command requiring explicit approval:
+
+```json
+{
+  "blocked": false,
+  "confirmation_required": true,
+  "reason": "..."
+}
+```
+
+Permanently blocked command:
+
+```json
+{
+  "blocked": true,
+  "confirmation_required": false,
+  "reason": "..."
+}
+```
+
+Automation clients should call this endpoint before a risky deployment step so they can surface the approval boundary before connecting to the server.
+
 ### Execute a command
 
 ```http
@@ -108,6 +153,8 @@ Normal response:
 ```
 
 `timeout_ms` defaults to 30 seconds and is clamped to 1–180 seconds.
+
+`/api/ops/exec` also runs the safety classification before creating an SSH session. A permanently blocked command returns HTTP `403` immediately. A command that requires confirmation returns HTTP `409` immediately unless the caller sends `approve_risk: true`.
 
 For a command that requires explicit approval, the first request returns:
 
