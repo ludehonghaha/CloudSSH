@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CloudSSH Ops Gateway
-  version: 0.1.0
+  version: 0.2.0
   description: Controlled operations API for servers saved and trusted in CloudSSH.
 servers:
   - url: https://YOUR_CLOUDSSH_DOMAIN
@@ -45,10 +45,47 @@ paths:
                   additionalProperties: true
         '401':
           description: Invalid bearer credential.
+  /api/ops/check:
+    post:
+      operationId: checkOpsCommand
+      summary: Classify a command with CloudSSH's safety policy without opening an SSH session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command:
+                  type: string
+                  minLength: 1
+                  maxLength: 32768
+              required: [command]
+              additionalProperties: false
+      responses:
+        '200':
+          description: Safety classification for the command.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  blocked:
+                    type: boolean
+                  confirmation_required:
+                    type: boolean
+                  reason:
+                    type: string
+                required: [blocked, confirmation_required]
+        '400':
+          description: Invalid command body.
+        '401':
+          description: Invalid bearer credential.
   /api/ops/exec:
     post:
       operationId: executeOpsCommand
       summary: Execute one shell command on a saved CloudSSH server through the existing SSH exec channel.
+      description: Safety classification happens before any SSH session is opened. Permanently blocked commands return 403, and confirmation-required commands return 409 unless approve_risk=true.
       requestBody:
         required: true
         content:
