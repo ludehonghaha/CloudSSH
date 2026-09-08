@@ -41,13 +41,6 @@ jobs:
           node-version: "22"
           cache: "pnpm"
 
-      - name: Check Cloudflare deployment credentials
-        run: |
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-            echo "Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID repository secret."
-            exit 1
-          fi
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -65,6 +58,13 @@ jobs:
 
       - name: Browser E2E and accessibility tests
         run: pnpm run test:e2e
+
+      - name: Check Cloudflare deployment credentials
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID repository secret."
+            exit 1
+          fi
 
       - name: Build frontend and deploy (test)
         if: github.ref == 'refs/heads/test'
