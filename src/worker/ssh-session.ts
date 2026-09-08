@@ -69,6 +69,7 @@ import {
 } from '../types';
 import { AgentCore } from './agent/core';
 import { AgentExecChannel } from './agent/exec-channel';
+import { isBlockedCommand, needsConfirmation } from './agent/safety';
 import { TerminalContext } from './agent/terminal-context';
 import type { AgentMemoryProvider, UnifiedServerMemory } from './agent/types';
 import { DirectTcpipStream } from './direct-tcpip-stream';
@@ -2082,6 +2083,17 @@ export class SSHSession {
           return;
         }
 
+        // Ops Gateway messages。只有 Worker 内部写入 opsMode 的预填充会话才允许执行。
+        if (parsed.type === 'ops_exec') {
+          await this.handleOpsExec(
+            parsed.request_id,
+            parsed.command,
+            parsed.timeout_ms,
+            parsed.approve_risk
+          );
+          return;
+        }
+
         // Agent messages
         // agent_stop / agent_confirm 已由 durable-object.ts 在 webSocketMessage 入口
         // 提前拦截并通过 handleAgentControl 同步处理，不再到达此处。
@@ -2700,6 +2712,13 @@ export class SSHSession {
       }
     }
     this.sendStatus('Shell 已就绪', 'shell_ready');
+    if (this.config.opsMode) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'ops_ready' }));
+      } catch {
+        /* 内部 Ops WebSocket 可能已关闭 */
+      }
+    }
     if (this.config.sessionPolicy?.allowMetadataMutation !== false) {
       void this.detectRemoteOS();
     }
@@ -2755,6 +2774,73 @@ export class SSHSession {
   }
 
   // ==================== Agent Integration ====================
+
+  /**
+   * Worker Ops Gateway 的单命令执行入口。
+   * opsMode 只能由 Worker 内部预填充，匿名客户端字段会在 DO 层被剥离。
+   */
+  private async handleOpsExec(
+    requestId: unknown,
+    command: unknown,
+    timeoutMs: unknown,
+    approveRisk: unknown
+  ): Promise<void> {
+    const id =
+      typeof requestId === 'string' && requestId.length > 0 && requestId.length <= 128
+        ? requestId
+        : crypto.randomUUID();
+    const send = (payload: Record<string, unknown>) => {
+      try {
+        if (this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: 'ops_exec_result', request_id: id, ...payload }));
+        }
+      } catch {
+        /* 内部 WebSocket 已关闭 */
+      }
+    };
+
+    if (!this.config.opsMode) {
+      send({ blocked: true, reason: 'Ops execution is not enabled for this SSH session' });
+      return;
+    }
+    if (this.state !== 'ready') {
+      send({ stderr: 'SSH session is not ready', exit_code: -1 });
+      return;
+    }
+    if (typeof command !== 'string' || command.trim().length === 0 || command.length > 32_768) {
+      send({ stderr: 'Invalid command', exit_code: -1 });
+      return;
+    }
+
+    const blocked = isBlockedCommand(command);
+    if (blocked.blocked) {
+      send({ blocked: true, reason: blocked.reason || 'Command blocked by safety policy' });
+      return;
+    }
+    const confirmation = needsConfirmation(command);
+    if (confirmation.required && approveRisk !== true) {
+      send({
+        confirmation_required: true,
+        reason: confirmation.reason || 'Command requires explicit approval',
+      });
+      return;
+    }
+
+    const timeout =
+      typeof timeoutMs === 'number' && Number.isFinite(timeoutMs)
+        ? Math.min(180_000, Math.max(1_000, Math.floor(timeoutMs)))
+        : 30_000;
+    try {
+      const result = await this.executeAgentCommand(command, timeout);
+      send({ stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode });
+    } catch (error) {
+      send({
+        stdout: '',
+        stderr: error instanceof Error ? error.message : String(error),
+        exit_code: -1,
+      });
+    }
+  }
 
   private async handleAgentStart(
     userMessage: string,

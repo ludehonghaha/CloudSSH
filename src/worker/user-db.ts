@@ -289,6 +289,13 @@ export class UserDBDO {
       if (path === '/internal/oauth-user' && request.method === 'POST') {
         return this.handleOAuthUser(request);
       }
+      if (path === '/internal/operator-context' && request.method === 'GET') {
+        const githubId = Number(url.searchParams.get('github_id'));
+        if (!Number.isInteger(githubId) || githubId <= 0) {
+          return Response.json({ error: 'Invalid github_id' }, { status: 400 });
+        }
+        return this.handleOperatorContext(githubId);
+      }
 
       // --- Session 管理 ---
       if (path === '/internal/session/create' && request.method === 'POST') {
@@ -538,6 +545,16 @@ export class UserDBDO {
     )[0];
 
     return Response.json(newUser);
+  }
+
+  /** Worker Ops Gateway 专用：按 GitHub ID 解析当前 DO 内的用户行，不创建或修改用户。 */
+  private handleOperatorContext(githubId: number): Response {
+    const user = this.one<UserRow>(
+      'SELECT id, github_id, username, avatar_url FROM users WHERE github_id = ?',
+      githubId
+    );
+    if (!user) return Response.json({ error: 'User not found' }, { status: 404 });
+    return Response.json(user);
   }
 
   // ==================== Session 管理 ====================

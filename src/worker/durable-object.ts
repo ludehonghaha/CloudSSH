@@ -289,6 +289,7 @@ export class SSHSessionDO {
       delete config.jumpHosts;
       delete config.knownHostIdentity;
       delete config.sessionPolicy;
+      delete config.opsMode;
 
       if (!config.host || !config.username || (!config.password && !config.privateKey)) {
         ws.send(JSON.stringify({ type: 'error', message: 'Missing credentials' }));
