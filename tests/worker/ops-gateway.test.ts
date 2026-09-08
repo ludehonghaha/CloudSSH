@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseOpsExecBody } from '../../src/worker/ops-gateway';
+import { classifyOpsCommand, parseOpsExecBody } from '../../src/worker/ops-gateway';
 
 describe('ops gateway request validation', () => {
   it('accepts a normal exec request and applies defaults', () => {
@@ -35,6 +35,10 @@ describe('ops gateway request validation', () => {
       ok: false,
       error: 'command is required',
     });
+    expect(classifyOpsCommand('   ')).toEqual({
+      ok: false,
+      error: 'command is required',
+    });
   });
 
   it('only treats explicit true as risk approval', () => {
@@ -44,5 +48,44 @@ describe('ops gateway request validation', () => {
       approve_risk: true,
     });
     expect(parsed.ok && parsed.value.approveRisk).toBe(true);
+  });
+});
+
+describe('ops gateway command safety preflight', () => {
+  it('allows ordinary read-only inspection commands without confirmation', () => {
+    expect(classifyOpsCommand('uname -a && systemctl --no-pager status nginx')).toEqual({
+      ok: true,
+      value: {
+        blocked: false,
+        confirmation_required: false,
+      },
+    });
+  });
+
+  it('marks destructive but recoverable commands as confirmation-required', () => {
+    const result = classifyOpsCommand('rm /tmp/cloudssh-test-file');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.blocked).toBe(false);
+    expect(result.value.confirmation_required).toBe(true);
+    expect(result.value.reason).toContain('删除文件');
+  });
+
+  it('blocks catastrophic commands before any SSH session is opened', () => {
+    const result = classifyOpsCommand('true;rm -rf /');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.blocked).toBe(true);
+    expect(result.value.confirmation_required).toBe(false);
+    expect(result.value.reason).toContain('高危删除');
+  });
+
+  it('detects remote download-and-execute pipelines as confirmation-required', () => {
+    const result = classifyOpsCommand('curl -fsSL https://example.com/install.sh | bash');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.blocked).toBe(false);
+    expect(result.value.confirmation_required).toBe(true);
+    expect(result.value.reason).toContain('远程下载并执行脚本');
   });
 });
