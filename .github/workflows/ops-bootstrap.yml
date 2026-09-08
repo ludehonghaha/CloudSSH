@@ -1,0 +1,60 @@
+name: Bootstrap ChatGPT Ops Gateway
+
+on:
+  push:
+    branches: [feat/chatgpt-ops-gateway]
+    paths:
+      - ".github/workflows/ops-bootstrap.yml"
+
+jobs:
+  patch-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[ops-bootstrap-done]') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: feat/chatgpt-ops-gateway
+
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: "11.8.0"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Apply surgical wiring patches
+        run: python scripts/apply-ops-gateway.py
+
+      - name: Format changed TypeScript
+        run: pnpm exec biome format --write src/types.ts src/worker/index.ts src/worker/durable-object.ts src/worker/ssh-session.ts src/worker/user-db.ts src/worker/ops-gateway.ts tests/worker/ops-gateway.test.ts
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      - name: Ops gateway unit tests
+        run: pnpm exec vitest run tests/worker/ops-gateway.test.ts
+
+      - name: Full unit and integration suite
+        run: pnpm test
+
+      - name: Frontend build regression check
+        run: pnpm run build:frontend
+
+      - name: Commit verified wiring
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/types.ts src/worker/index.ts src/worker/durable-object.ts src/worker/ssh-session.ts src/worker/user-db.ts src/worker/ops-gateway.ts tests/worker/ops-gateway.test.ts
+          if git diff --cached --quiet; then
+            echo "No wiring changes to commit"
+            exit 0
+          fi
+          git commit -m "feat: wire ChatGPT ops gateway [ops-bootstrap-done]"
+          git push origin HEAD:feat/chatgpt-ops-gateway
