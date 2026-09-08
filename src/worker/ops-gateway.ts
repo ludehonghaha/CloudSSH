@@ -5,12 +5,29 @@ const MAX_COMMAND_CHARS = 32_768;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 180_000;
 const HANDSHAKE_GRACE_MS = 25_000;
+const MAX_RUN_STEPS = 20;
+const MAX_RUN_TOTAL_COMMAND_CHARS = 131_072;
+const MAX_RUN_TOTAL_TIMEOUT_MS = 300_000;
+const MAX_STEP_NAME_CHARS = 80;
 
 type OpsExecRequest = {
   serverId: number;
   command: string;
   timeoutMs: number;
   approveRisk: boolean;
+};
+
+type OpsRunStep = {
+  name?: string;
+  command: string;
+  timeoutMs: number;
+  approveRisk: boolean;
+};
+
+type OpsRunRequest = {
+  serverId: number;
+  steps: OpsRunStep[];
+  stopOnError: boolean;
 };
 
 type OpsExecFrame = {
@@ -28,6 +45,18 @@ type OpsCommandClassification = {
   blocked: boolean;
   confirmation_required: boolean;
   reason?: string;
+};
+
+type OpsExecResult = {
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+};
+
+type OpsRunResult = OpsExecResult & {
+  index: number;
+  name?: string;
+  command: string;
 };
 
 function getUserDBStub(env: Env, githubId: string): DurableObjectStub {
@@ -97,6 +126,17 @@ function validateCommand(command: unknown): { ok: true; command: string } | { ok
   return { ok: true, command };
 }
 
+function parseTimeout(rawTimeout: unknown): { ok: true; timeoutMs: number } | { ok: false; error: string } {
+  if (rawTimeout === undefined) return { ok: true, timeoutMs: 30_000 };
+  if (typeof rawTimeout !== 'number' || !Number.isFinite(rawTimeout)) {
+    return { ok: false, error: 'timeout_ms must be a number' };
+  }
+  return {
+    ok: true,
+    timeoutMs: Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.floor(rawTimeout))),
+  };
+}
+
 export function classifyOpsCommand(command: unknown):
   | { ok: true; value: OpsCommandClassification }
   | { ok: false; error: string } {
@@ -144,30 +184,104 @@ export function parseOpsExecBody(input: unknown):
   }
   const body = input as Record<string, unknown>;
   const rawServerId = body.server_id;
-  const rawCommand = body.command;
-  const rawTimeout = body.timeout_ms;
 
   if (!Number.isInteger(rawServerId) || Number(rawServerId) <= 0) {
     return { ok: false, error: 'server_id must be a positive integer' };
   }
-  const validatedCommand = validateCommand(rawCommand);
+  const validatedCommand = validateCommand(body.command);
   if (!validatedCommand.ok) return validatedCommand;
-
-  let timeoutMs = 30_000;
-  if (rawTimeout !== undefined) {
-    if (typeof rawTimeout !== 'number' || !Number.isFinite(rawTimeout)) {
-      return { ok: false, error: 'timeout_ms must be a number' };
-    }
-    timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.floor(rawTimeout)));
-  }
+  const timeout = parseTimeout(body.timeout_ms);
+  if (!timeout.ok) return timeout;
 
   return {
     ok: true,
     value: {
       serverId: Number(rawServerId),
       command: validatedCommand.command,
-      timeoutMs,
+      timeoutMs: timeout.timeoutMs,
       approveRisk: body.approve_risk === true,
+    },
+  };
+}
+
+export function parseOpsRunBody(input: unknown):
+  | { ok: true; value: OpsRunRequest }
+  | { ok: false; error: string } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { ok: false, error: 'Invalid JSON body' };
+  }
+  const body = input as Record<string, unknown>;
+  const rawServerId = body.server_id;
+  const rawSteps = body.steps;
+
+  if (!Number.isInteger(rawServerId) || Number(rawServerId) <= 0) {
+    return { ok: false, error: 'server_id must be a positive integer' };
+  }
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    return { ok: false, error: 'steps must be a non-empty array' };
+  }
+  if (rawSteps.length > MAX_RUN_STEPS) {
+    return { ok: false, error: `steps exceeds ${MAX_RUN_STEPS} items` };
+  }
+
+  const steps: OpsRunStep[] = [];
+  let totalCommandChars = 0;
+  let totalTimeoutMs = 0;
+
+  for (let index = 0; index < rawSteps.length; index++) {
+    const rawStep = rawSteps[index];
+    if (!rawStep || typeof rawStep !== 'object' || Array.isArray(rawStep)) {
+      return { ok: false, error: `steps[${index}] must be an object` };
+    }
+    const step = rawStep as Record<string, unknown>;
+    const validatedCommand = validateCommand(step.command);
+    if (!validatedCommand.ok) {
+      return { ok: false, error: `steps[${index}]: ${validatedCommand.error}` };
+    }
+    const timeout = parseTimeout(step.timeout_ms);
+    if (!timeout.ok) {
+      return { ok: false, error: `steps[${index}]: ${timeout.error}` };
+    }
+    let name: string | undefined;
+    if (step.name !== undefined) {
+      if (typeof step.name !== 'string' || step.name.trim().length === 0) {
+        return { ok: false, error: `steps[${index}].name must be a non-empty string` };
+      }
+      if (step.name.length > MAX_STEP_NAME_CHARS) {
+        return { ok: false, error: `steps[${index}].name exceeds ${MAX_STEP_NAME_CHARS} characters` };
+      }
+      name = step.name;
+    }
+
+    totalCommandChars += validatedCommand.command.length;
+    totalTimeoutMs += timeout.timeoutMs;
+    if (totalCommandChars > MAX_RUN_TOTAL_COMMAND_CHARS) {
+      return {
+        ok: false,
+        error: `combined step commands exceed ${MAX_RUN_TOTAL_COMMAND_CHARS} characters`,
+      };
+    }
+    if (totalTimeoutMs > MAX_RUN_TOTAL_TIMEOUT_MS) {
+      return {
+        ok: false,
+        error: `combined step timeouts exceed ${MAX_RUN_TOTAL_TIMEOUT_MS} ms`,
+      };
+    }
+
+    steps.push({
+      name,
+      command: validatedCommand.command,
+      timeoutMs: timeout.timeoutMs,
+      approveRisk: step.approve_risk === true,
+    });
+  }
+
+  return {
+    ok: true,
+    value: {
+      serverId: Number(rawServerId),
+      steps,
+      stopOnError: body.stop_on_error !== false,
     },
   };
 }
@@ -321,6 +435,45 @@ async function executeOverInternalWebSocket(
   });
 }
 
+async function parseExecResponse(response: Response): Promise<OpsExecResult | null> {
+  if (!response.ok) return null;
+  try {
+    const body = await response.clone().json<Record<string, unknown>>();
+    return {
+      stdout: typeof body.stdout === 'string' ? body.stdout : '',
+      stderr: typeof body.stderr === 'string' ? body.stderr : '',
+      exit_code: typeof body.exit_code === 'number' ? body.exit_code : -1,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function preflightRunSteps(steps: OpsRunStep[]): Response | null {
+  for (let index = 0; index < steps.length; index++) {
+    const step = steps[index];
+    const classification = classifyOpsCommand(step.command);
+    if (!classification.ok) {
+      return jsonError(classification.error, 400, { step_index: index, step_name: step.name });
+    }
+    if (classification.value.blocked) {
+      return jsonError(classification.value.reason || 'Command blocked by safety policy', 403, {
+        blocked: true,
+        step_index: index,
+        step_name: step.name,
+      });
+    }
+    if (classification.value.confirmation_required && !step.approveRisk) {
+      return jsonError(classification.value.reason || 'Command requires explicit approval', 409, {
+        confirmation_required: true,
+        step_index: index,
+        step_name: step.name,
+      });
+    }
+  }
+  return null;
+}
+
 export async function handleOpsGateway(request: Request, url: URL, env: Env): Promise<Response> {
   const auth = await authorizeOpsRequest(request, env);
   if (auth instanceof Response) return auth;
@@ -393,6 +546,86 @@ export async function handleOpsGateway(request: Request, url: URL, env: Env): Pr
       parsed.value.approveRisk,
       (request as any).cf?.colo || 'UNKNOWN'
     );
+  }
+
+  if (url.pathname === '/api/ops/run' && request.method === 'POST') {
+    let rawBody: unknown;
+    try {
+      rawBody = await request.json();
+    } catch {
+      return jsonError('Invalid JSON body', 400);
+    }
+    const parsed = parseOpsRunBody(rawBody);
+    if (!parsed.ok) return jsonError(parsed.error, 400);
+
+    const preflight = preflightRunSteps(parsed.value.steps);
+    if (preflight) return preflight;
+
+    const config = await getSavedConnectionConfig(
+      env,
+      auth.githubId,
+      user.id,
+      parsed.value.serverId
+    );
+    if (config instanceof Response) return config;
+
+    const results: OpsRunResult[] = [];
+    const colo = (request as any).cf?.colo || 'UNKNOWN';
+    let stoppedOnError = false;
+    let failedStep: number | null = null;
+
+    for (let index = 0; index < parsed.value.steps.length; index++) {
+      const step = parsed.value.steps[index];
+      const response = await executeOverInternalWebSocket(
+        env,
+        config,
+        step.command,
+        step.timeoutMs,
+        step.approveRisk,
+        colo
+      );
+      const result = await parseExecResponse(response);
+      if (!result) {
+        let detail: Record<string, unknown> = {};
+        try {
+          detail = await response.clone().json<Record<string, unknown>>();
+        } catch {
+          detail = {};
+        }
+        return Response.json(
+          {
+            error: typeof detail.error === 'string' ? detail.error : 'Ops step transport failed',
+            step_index: index,
+            step_name: step.name,
+            results,
+          },
+          { status: response.status }
+        );
+      }
+
+      results.push({
+        index,
+        name: step.name,
+        command: step.command,
+        ...result,
+      });
+
+      if (result.exit_code !== 0) {
+        failedStep = index;
+        if (parsed.value.stopOnError) {
+          stoppedOnError = true;
+          break;
+        }
+      }
+    }
+
+    return Response.json({
+      completed: results.length === parsed.value.steps.length,
+      stop_on_error: parsed.value.stopOnError,
+      stopped_on_error: stoppedOnError,
+      failed_step: failedStep,
+      results,
+    });
   }
 
   return jsonError('Not Found', 404);
