@@ -71,6 +71,8 @@ export interface SSHConnectionConfig {
   jumpHosts?: SSHJumpHostConfig[];
   /** 仅可由 Worker 内部的一次性分享兑换流程写入，客户端输入必须剥离。 */
   sessionPolicy?: SSHSessionPolicy;
+  /** 仅由受信任的 Worker Ops Gateway 写入；匿名客户端输入必须剥离。 */
+  opsMode?: boolean;
 }
 
 export interface SSHSessionPolicy {
@@ -168,6 +170,10 @@ export interface Env {
   DEBUG_MODE?: string;
   // 一次性 SSH 分享（默认关闭；true 时登录用户可创建分享链接）
   ENABLE_SSH_SHARING?: string;
+  // ChatGPT / automation 受控运维网关。OPS_API_TOKEN 必须通过 wrangler secret 配置。
+  OPS_API_TOKEN?: string;
+  // 允许 Ops Gateway 访问的唯一 GitHub 数字用户 ID。
+  OPS_GITHUB_ID?: string;
 }
 
 export interface UserInfo {

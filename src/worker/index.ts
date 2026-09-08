@@ -10,6 +10,7 @@ import {
   isGitHubUserAllowed,
 } from './auth';
 import { HTML } from './html';
+import { handleOpsGateway } from './ops-gateway';
 
 export { SSHSessionDO } from './durable-object';
 export { SSHShareDO } from './share-do';
@@ -191,6 +192,12 @@ export default {
 
       if (url.pathname === '/api/auth/me') {
         return handleGetMe(request, env);
+      }
+
+      // ==================== ChatGPT / Automation Ops Gateway ====================
+
+      if (url.pathname === '/api/ops' || url.pathname.startsWith('/api/ops/')) {
+        return handleOpsGateway(request, url, env);
       }
 
       // ==================== 一次性 SSH 分享公开兑换 ====================

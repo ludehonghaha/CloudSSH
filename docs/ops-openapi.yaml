@@ -1,0 +1,115 @@
+openapi: 3.1.0
+info:
+  title: CloudSSH Ops Gateway
+  version: 0.1.0
+  description: Controlled operations API for servers saved and trusted in CloudSSH.
+servers:
+  - url: https://YOUR_CLOUDSSH_DOMAIN
+security:
+  - bearerAuth: []
+paths:
+  /api/ops/health:
+    get:
+      operationId: opsHealth
+      summary: Check whether the operations gateway is configured and authenticated.
+      responses:
+        '200':
+          description: Gateway is ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  operator:
+                    type: string
+                required: [status, operator]
+        '401':
+          description: Invalid bearer credential.
+        '503':
+          description: Gateway environment variables are not configured.
+  /api/ops/servers:
+    get:
+      operationId: listOpsServers
+      summary: List non-secret metadata for servers owned by the configured CloudSSH account.
+      responses:
+        '200':
+          description: Saved servers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+        '401':
+          description: Invalid bearer credential.
+  /api/ops/exec:
+    post:
+      operationId: executeOpsCommand
+      summary: Execute one shell command on a saved CloudSSH server through the existing SSH exec channel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                server_id:
+                  type: integer
+                  minimum: 1
+                command:
+                  type: string
+                  minLength: 1
+                  maxLength: 32768
+                timeout_ms:
+                  type: integer
+                  minimum: 1000
+                  maximum: 180000
+                  default: 30000
+                approve_risk:
+                  type: boolean
+                  default: false
+                  description: Set true only after the human explicitly approves a command that previously returned confirmation_required.
+              required: [server_id, command]
+              additionalProperties: false
+      responses:
+        '200':
+          description: Command completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stdout:
+                    type: string
+                  stderr:
+                    type: string
+                  exit_code:
+                    type: integer
+                required: [stdout, stderr, exit_code]
+        '401':
+          description: Invalid bearer credential.
+        '403':
+          description: Command is permanently blocked by the CloudSSH safety policy.
+        '409':
+          description: Host trust is incomplete or this command requires explicit human approval.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  confirmation_required:
+                    type: boolean
+                required: [error]
+        '504':
+          description: SSH connection or command execution timed out.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
