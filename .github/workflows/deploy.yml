@@ -14,13 +14,21 @@ on:
       - "**/*.gif"
       - "**/*.svg"
       - "AGENTS.md"
+  workflow_dispatch:
 
 jobs:
   deploy:
-    if: github.repository_owner == 'newbietan'
+    if: github.repository_owner == 'ludehonghaha'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      OPS_API_TOKEN: ${{ secrets.OPS_API_TOKEN }}
+      GITHUB_CLIENT_ID: ${{ secrets.GITHUB_CLIENT_ID }}
+      GITHUB_CLIENT_SECRET: ${{ secrets.GITHUB_CLIENT_SECRET }}
+      BASE_URL: ${{ secrets.BASE_URL }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
@@ -32,6 +40,13 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
+
+      - name: Check Cloudflare deployment credentials
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID repository secret."
+            exit 1
+          fi
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -53,14 +68,42 @@ jobs:
 
       - name: Build frontend and deploy (test)
         if: github.ref == 'refs/heads/test'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm run deploy:test
 
       - name: Build frontend and deploy (production)
-        if: github.ref == 'refs/heads/main'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        if: github.ref != 'refs/heads/test'
         run: pnpm run deploy
+
+      - name: Configure production Worker secrets
+        if: github.ref != 'refs/heads/test'
+        run: |
+          if [ -n "${OPS_API_TOKEN:-}" ]; then
+            printf '%s' "$OPS_API_TOKEN" | pnpm exec wrangler secret put OPS_API_TOKEN
+          else
+            echo "OPS_API_TOKEN is not configured yet; /api/ops will stay disabled."
+          fi
+          if [ -n "${GITHUB_CLIENT_ID:-}" ]; then
+            printf '%s' "$GITHUB_CLIENT_ID" | pnpm exec wrangler secret put GITHUB_CLIENT_ID
+          fi
+          if [ -n "${GITHUB_CLIENT_SECRET:-}" ]; then
+            printf '%s' "$GITHUB_CLIENT_SECRET" | pnpm exec wrangler secret put GITHUB_CLIENT_SECRET
+          fi
+          if [ -n "${BASE_URL:-}" ]; then
+            printf '%s' "$BASE_URL" | pnpm exec wrangler secret put BASE_URL
+          fi
+
+      - name: Configure test Worker secrets
+        if: github.ref == 'refs/heads/test'
+        run: |
+          if [ -n "${OPS_API_TOKEN:-}" ]; then
+            printf '%s' "$OPS_API_TOKEN" | pnpm exec wrangler secret put OPS_API_TOKEN --env test
+          fi
+          if [ -n "${GITHUB_CLIENT_ID:-}" ]; then
+            printf '%s' "$GITHUB_CLIENT_ID" | pnpm exec wrangler secret put GITHUB_CLIENT_ID --env test
+          fi
+          if [ -n "${GITHUB_CLIENT_SECRET:-}" ]; then
+            printf '%s' "$GITHUB_CLIENT_SECRET" | pnpm exec wrangler secret put GITHUB_CLIENT_SECRET --env test
+          fi
+          if [ -n "${BASE_URL:-}" ]; then
+            printf '%s' "$BASE_URL" | pnpm exec wrangler secret put BASE_URL --env test
+          fi
