@@ -5,18 +5,21 @@ workers_dev = true
 
 [vars]
 DEBUG_MODE = "false"
+OPS_GITHUB_ID = "254142048"
 
 # 构建监视路径：仅源代码变动时触发重新构建
 [build]
 watch_dir = "."
 
-# 下述注释的配置推荐采用环境变量的形式在 Cloudflare Dashboard 中直接添加：
+# 下述配置推荐采用 Cloudflare secret / environment variable：
+# - OPS_API_TOKEN（ChatGPT / automation Ops Gateway Bearer Token，必须保密）
 # - GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET（GitHub OAuth）
 # - GITHUB_ALLOWED_USER_IDS（可选，逗号分隔的 GitHub 数字用户 ID 白名单）
 # - REQUIRE_GITHUB_AUTH（可选，true 时禁用匿名 SSH，要求 GitHub 登录）
 # - ENABLE_SSH_SHARING（可选，true 时允许登录用户创建一次性 SSH 分享）
 # - TURNSTILE_SECRET / TURNSTILE_SITEKEY（Bot 验证）
 # - BASE_URL（OAuth 回调地址，需与实际域名一致）
+# OPS_GITHUB_ID 固定在 vars 中，只允许当前仓库所有者的 CloudSSH 用户数据被 Ops API 访问。
 
 [[durable_objects.bindings]]
 name = "SSH_SESSION"
@@ -48,6 +51,7 @@ name = "cloudssh-test"
 
 [env.test.vars]
 DEBUG_MODE = "true"
+OPS_GITHUB_ID = "254142048"
 
 [[env.test.durable_objects.bindings]]
 name = "SSH_SESSION"
