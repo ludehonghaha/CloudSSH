@@ -1,4 +1,5 @@
 import { ALLOWED_LOCATION_HINTS, type Env, type SSHConnectionConfig, type UserInfo } from '../types';
+import { isBlockedCommand, needsConfirmation } from './agent/safety';
 
 const MAX_COMMAND_CHARS = 32_768;
 const MIN_TIMEOUT_MS = 1_000;
@@ -20,6 +21,12 @@ type OpsExecFrame = {
   exit_code?: number;
   blocked?: boolean;
   confirmation_required?: boolean;
+  reason?: string;
+};
+
+type OpsCommandClassification = {
+  blocked: boolean;
+  confirmation_required: boolean;
   reason?: string;
 };
 
@@ -80,6 +87,55 @@ async function getOperatorUser(env: Env, githubId: string): Promise<UserInfo | R
   return response.json<UserInfo>();
 }
 
+function validateCommand(command: unknown): { ok: true; command: string } | { ok: false; error: string } {
+  if (typeof command !== 'string' || command.trim().length === 0) {
+    return { ok: false, error: 'command is required' };
+  }
+  if (command.length > MAX_COMMAND_CHARS) {
+    return { ok: false, error: `command exceeds ${MAX_COMMAND_CHARS} characters` };
+  }
+  return { ok: true, command };
+}
+
+export function classifyOpsCommand(command: unknown):
+  | { ok: true; value: OpsCommandClassification }
+  | { ok: false; error: string } {
+  const validated = validateCommand(command);
+  if (!validated.ok) return validated;
+
+  const blocked = isBlockedCommand(validated.command);
+  if (blocked.blocked) {
+    return {
+      ok: true,
+      value: {
+        blocked: true,
+        confirmation_required: false,
+        reason: blocked.reason || 'Command blocked by safety policy',
+      },
+    };
+  }
+
+  const confirmation = needsConfirmation(validated.command);
+  if (confirmation.required) {
+    return {
+      ok: true,
+      value: {
+        blocked: false,
+        confirmation_required: true,
+        reason: confirmation.reason || 'Command requires explicit approval',
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      blocked: false,
+      confirmation_required: false,
+    },
+  };
+}
+
 export function parseOpsExecBody(input: unknown):
   | { ok: true; value: OpsExecRequest }
   | { ok: false; error: string } {
@@ -94,12 +150,8 @@ export function parseOpsExecBody(input: unknown):
   if (!Number.isInteger(rawServerId) || Number(rawServerId) <= 0) {
     return { ok: false, error: 'server_id must be a positive integer' };
   }
-  if (typeof rawCommand !== 'string' || rawCommand.trim().length === 0) {
-    return { ok: false, error: 'command is required' };
-  }
-  if (rawCommand.length > MAX_COMMAND_CHARS) {
-    return { ok: false, error: `command exceeds ${MAX_COMMAND_CHARS} characters` };
-  }
+  const validatedCommand = validateCommand(rawCommand);
+  if (!validatedCommand.ok) return validatedCommand;
 
   let timeoutMs = 30_000;
   if (rawTimeout !== undefined) {
@@ -113,7 +165,7 @@ export function parseOpsExecBody(input: unknown):
     ok: true,
     value: {
       serverId: Number(rawServerId),
-      command: rawCommand,
+      command: validatedCommand.command,
       timeoutMs,
       approveRisk: body.approve_risk === true,
     },
@@ -287,6 +339,21 @@ export async function handleOpsGateway(request: Request, url: URL, env: Env): Pr
     );
   }
 
+  if (url.pathname === '/api/ops/check' && request.method === 'POST') {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return jsonError('Invalid JSON body', 400);
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return jsonError('Invalid JSON body', 400);
+    }
+    const classification = classifyOpsCommand((body as Record<string, unknown>).command);
+    if (!classification.ok) return jsonError(classification.error, 400);
+    return Response.json(classification.value);
+  }
+
   if (url.pathname === '/api/ops/exec' && request.method === 'POST') {
     let rawBody: unknown;
     try {
@@ -296,6 +363,19 @@ export async function handleOpsGateway(request: Request, url: URL, env: Env): Pr
     }
     const parsed = parseOpsExecBody(rawBody);
     if (!parsed.ok) return jsonError(parsed.error, 400);
+
+    const classification = classifyOpsCommand(parsed.value.command);
+    if (!classification.ok) return jsonError(classification.error, 400);
+    if (classification.value.blocked) {
+      return jsonError(classification.value.reason || 'Command blocked by safety policy', 403, {
+        blocked: true,
+      });
+    }
+    if (classification.value.confirmation_required && !parsed.value.approveRisk) {
+      return jsonError(classification.value.reason || 'Command requires explicit approval', 409, {
+        confirmation_required: true,
+      });
+    }
 
     const config = await getSavedConnectionConfig(
       env,
