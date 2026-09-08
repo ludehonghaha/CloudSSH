@@ -32,9 +32,6 @@ jobs:
       - name: Apply surgical wiring patches
         run: python scripts/apply-ops-gateway.py
 
-      - name: Format changed TypeScript
-        run: pnpm exec biome format --write src/types.ts src/worker/index.ts src/worker/durable-object.ts src/worker/ssh-session.ts src/worker/user-db.ts src/worker/ops-gateway.ts tests/worker/ops-gateway.test.ts
-
       - name: Type check
         run: pnpm run typecheck
 
