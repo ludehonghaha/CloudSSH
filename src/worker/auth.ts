@@ -27,6 +27,18 @@ function getBaseUrl(env: Env, request: Request): string {
   }
 }
 
+function sanitizeReturnTo(value: string | null | undefined): string | null {
+  if (!value || value.length > 12_000) return null;
+  if (!value.startsWith('/') || value.startsWith('//')) return null;
+  try {
+    const parsed = new URL(value, 'https://cloudssh.invalid');
+    if (parsed.origin !== 'https://cloudssh.invalid') return null;
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return null;
+  }
+}
+
 // ==================== 获取 UserDBDO stub ====================
 
 function getUserDBStub(env: Env, githubId: string | number): DurableObjectStub {
@@ -85,13 +97,16 @@ export function isGitHubAuthRequired(env: Env): boolean {
 }
 
 function oauthFailure(message: string, status: number): Response {
-  return new Response(message, {
-    status,
-    headers: {
-      'Content-Type': 'text/plain;charset=UTF-8',
-      'Set-Cookie': 'oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
-    },
-  });
+  const headers = new Headers({ 'Content-Type': 'text/plain;charset=UTF-8' });
+  headers.append(
+    'Set-Cookie',
+    'oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+  );
+  headers.append(
+    'Set-Cookie',
+    'oauth_return_to=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+  );
+  return new Response(message, { status, headers });
 }
 
 // ==================== Session 中间件 ====================
@@ -133,6 +148,8 @@ export async function handleGitHubAuth(request: Request, env: Env): Promise<Resp
 
   const state = crypto.randomUUID();
   const baseUrl = getBaseUrl(env, request);
+  const requestUrl = new URL(request.url);
+  const returnTo = sanitizeReturnTo(requestUrl.searchParams.get('return_to'));
 
   const params = new URLSearchParams({
     client_id: env.GITHUB_CLIENT_ID,
@@ -141,13 +158,26 @@ export async function handleGitHubAuth(request: Request, env: Env): Promise<Resp
     state,
   });
 
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: `https://github.com/login/oauth/authorize?${params}`,
-      'Set-Cookie': `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
-    },
+  const headers = new Headers({
+    Location: `https://github.com/login/oauth/authorize?${params}`,
   });
+  headers.append(
+    'Set-Cookie',
+    `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
+  );
+  if (returnTo) {
+    headers.append(
+      'Set-Cookie',
+      `oauth_return_to=${encodeURIComponent(returnTo)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
+    );
+  } else {
+    headers.append(
+      'Set-Cookie',
+      'oauth_return_to=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+    );
+  }
+
+  return new Response(null, { status: 302, headers });
 }
 
 /**
@@ -254,9 +284,18 @@ export async function handleGitHubCallback(request: Request, env: Env): Promise<
 
   const sessionData = await sessionRes.json<{ token: string }>();
 
-  // 6. Set-Cookie + 重定向到首页
+  // 6. Set-Cookie + 重定向到首页/原 OAuth 授权页
+  let returnTo: string | null = null;
+  if (cookies.oauth_return_to) {
+    try {
+      returnTo = sanitizeReturnTo(decodeURIComponent(cookies.oauth_return_to));
+    } catch {
+      returnTo = null;
+    }
+  }
+
   const responseHeaders = new Headers();
-  responseHeaders.set('Location', baseUrl || '/');
+  responseHeaders.set('Location', returnTo ? `${baseUrl}${returnTo}` : baseUrl || '/');
   responseHeaders.append(
     'Set-Cookie',
     `session=${sessionData.token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`
@@ -264,6 +303,10 @@ export async function handleGitHubCallback(request: Request, env: Env): Promise<
   responseHeaders.append(
     'Set-Cookie',
     `oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
+  );
+  responseHeaders.append(
+    'Set-Cookie',
+    `oauth_return_to=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
   );
 
   return new Response(null, {
