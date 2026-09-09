@@ -48,6 +48,21 @@ jobs:
             exit 1
           fi
 
+      - name: Validate GitHub OAuth secrets
+        run: |
+          if [ -z "${GITHUB_CLIENT_ID:-}" ] || [ -z "${GITHUB_CLIENT_SECRET:-}" ]; then
+            echo "Missing CLOUDSSH_GITHUB_CLIENT_ID or CLOUDSSH_GITHUB_CLIENT_SECRET repository secret."
+            exit 1
+          fi
+          if [ "$GITHUB_CLIENT_ID" = "$GITHUB_CLIENT_SECRET" ]; then
+            echo "GitHub OAuth Client ID and Client Secret must not be identical."
+            exit 1
+          fi
+          if [[ "$GITHUB_CLIENT_ID" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "CLOUDSSH_GITHUB_CLIENT_ID looks like a 40-character client secret, not a GitHub OAuth Client ID."
+            exit 1
+          fi
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
