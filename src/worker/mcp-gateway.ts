@@ -1,7 +1,12 @@
 import type { Env } from '../types';
 import { handleOpsGateway } from './ops-gateway';
+import {
+  authenticateMcpRequest,
+  mcpBearerChallenge,
+  type McpAuthContext,
+} from './mcp-oauth';
 
-const SERVER_INFO = { name: 'cloudssh-ops', version: '1.0.0' } as const;
+const SERVER_INFO = { name: 'cloudssh-ops', version: '1.1.0' } as const;
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const LEGACY_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
 const SUPPORTED_PROTOCOL_VERSIONS = [
@@ -93,14 +98,14 @@ async function parseJsonResponse(response: Response): Promise<unknown> {
   }
 }
 
-function opsRequest(request: Request, path: string, init: RequestInit): Request {
+function opsRequest(request: Request, env: Env, path: string, init: RequestInit): Request {
   const url = new URL(request.url);
   url.pathname = path;
   url.search = '';
 
   const headers = new Headers();
-  const authorization = request.headers.get('Authorization');
-  if (authorization) headers.set('Authorization', authorization);
+  const opsToken = env.OPS_API_TOKEN?.trim();
+  if (opsToken) headers.set('Authorization', `Bearer ${opsToken}`);
   if (init.body !== undefined && init.body !== null) {
     headers.set('Content-Type', 'application/json');
   }
@@ -118,7 +123,7 @@ async function callOps(
   method: 'GET' | 'POST',
   body?: unknown
 ): Promise<{ response: Response; data: unknown }> {
-  const internal = opsRequest(request, path, {
+  const internal = opsRequest(request, env, path, {
     method,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -126,9 +131,21 @@ async function callOps(
   return { response, data: await parseJsonResponse(response) };
 }
 
-async function authorizeMcp(request: Request, env: Env, id: JsonRpcId): Promise<Response | null> {
+async function authorizeMcp(
+  request: Request,
+  env: Env,
+  id: JsonRpcId,
+  scope = 'cloudssh:read'
+): Promise<McpAuthContext | Response> {
+  const auth = await authenticateMcpRequest(request, env);
+  if (!auth) {
+    const response = rpcError(id, -32001, 'OAuth authorization required', 401);
+    response.headers.set('WWW-Authenticate', mcpBearerChallenge(request, env, scope));
+    return response;
+  }
+
   const { response, data } = await callOps(request, env, '/api/ops/health', 'GET');
-  if (response.ok) return null;
+  if (response.ok) return auth;
 
   const message =
     isRecord(data) && typeof data.error === 'string'
@@ -235,20 +252,25 @@ async function callMcpTool(
   env: Env,
   id: JsonRpcId,
   params: JsonRecord,
-  modern: boolean
+  modern: boolean,
+  auth: McpAuthContext
 ): Promise<Response> {
   const name = typeof params.name === 'string' ? params.name : '';
   const args = isRecord(params.arguments) ? params.arguments : {};
 
+  let requiredScope: 'cloudssh:read' | 'cloudssh:exec';
   let target: { path: string; method: 'GET' | 'POST'; body?: unknown };
   switch (name) {
     case 'cloudssh_health':
+      requiredScope = 'cloudssh:read';
       target = { path: '/api/ops/health', method: 'GET' };
       break;
     case 'cloudssh_list_servers':
+      requiredScope = 'cloudssh:read';
       target = { path: '/api/ops/servers', method: 'GET' };
       break;
     case 'cloudssh_exec':
+      requiredScope = 'cloudssh:exec';
       target = {
         path: '/api/ops/exec',
         method: 'POST',
@@ -262,6 +284,10 @@ async function callMcpTool(
       break;
     default:
       return rpcError(id, -32602, `Unknown tool: ${name || '(missing)'}`);
+  }
+
+  if (!auth.scopes.has(requiredScope)) {
+    return rpcError(id, -32003, `Missing required OAuth scope: ${requiredScope}`, 403);
   }
 
   const { response, data } = await callOps(request, env, target.path, target.method, target.body);
@@ -321,13 +347,19 @@ export async function handleMcpGateway(request: Request, env: Env): Promise<Resp
   const modern = isModernRequest(request, body);
 
   if (method === 'notifications/initialized' || method === 'notifications/cancelled') {
-    const authError = await authorizeMcp(request, env, id);
-    if (authError) return authError;
+    const auth = await authorizeMcp(request, env, id);
+    if (auth instanceof Response) return auth;
     return new Response(null, { status: 202 });
   }
 
-  const authError = await authorizeMcp(request, env, id);
-  if (authError) return authError;
+  const requestedScope =
+    method === 'tools/call' &&
+    isRecord(body.params) &&
+    body.params.name === 'cloudssh_exec'
+      ? 'cloudssh:exec'
+      : 'cloudssh:read';
+  const auth = await authorizeMcp(request, env, id, requestedScope);
+  if (auth instanceof Response) return auth;
 
   if (method === 'server/discover') {
     return rpcResult(
@@ -375,7 +407,7 @@ export async function handleMcpGateway(request: Request, env: Env): Promise<Resp
 
   if (method === 'tools/call') {
     const params = isRecord(body.params) ? body.params : {};
-    return callMcpTool(request, env, id, params, modern);
+    return callMcpTool(request, env, id, params, modern, auth);
   }
 
   return rpcError(id, -32601, `Method not found: ${method}`);
